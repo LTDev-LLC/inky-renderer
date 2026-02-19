@@ -8,8 +8,6 @@ data/
 # Renderer files
 .secrets.json
 .dev.vars
-.gallery-backup.json
-.backups/*
 
 # Playwright
 node_modules/

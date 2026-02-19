@@ -25,30 +25,40 @@ namespace jpeg_utils {
 // Probe the JPEG data to determine its kind
 JpegKind probeKind(const uint8_t *data, size_t len) {
   // Validate Magic Number: 0xFF, 0xD8 (SOI - Start of Image)
-  // Also ensure we have enough data to start parsing
   if (len < 4 || data[0] != 0xFF || data[1] != 0xD8)
     return JpegKind::INVALID;
 
   size_t pos = 2; // Start after SOI
-  while (pos + 3 < len) {
-    // Search for the next marker (0xFF byte followed by non-0xFF)
+
+  // Use pos + 1 < len to ensure we can at least read a marker byte safely
+  while (pos + 1 < len) {
+    // Search for the next marker indicator (0xFF)
     if (data[pos] != 0xFF) {
       ++pos;
       continue;
     }
-    // Skip any padding 0xFF bytes (e.g. 0xFF, 0xFF, 0xMarker)
-    while (data[pos] == 0xFF)
+
+    // Skip any padding 0xFF bytes WITH bounds checking
+    while (pos < len && data[pos] == 0xFF) {
       ++pos;
+    }
+
+    // If we ran out of data while skipping padding
+    if (pos >= len)
+      return JpegKind::INVALID;
 
     // Read the marker byte
     uint8_t marker = data[pos++];
 
     // Check for "Stand-alone" markers (no length/payload follows them)
-    // 0xD8 = SOI (Start of Image)
-    // 0xD9 = EOI (End of Image)
-    // 0xD0..0xD7 = RSTn (Restart Markers)
     if (marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7))
       continue;
+
+    // Start of Scan (SOS). Marks the beginning of compressed image data
+    // If we reach this without finding a SOF marker, the image is invalid
+    // or we shouldn't attempt to parse further
+    if (marker == 0xDA)
+      return JpegKind::INVALID;
 
     // Ensure we have enough data to read the 2-byte length field
     if (pos + 1 >= len)
@@ -64,38 +74,25 @@ JpegKind probeKind(const uint8_t *data, size_t len) {
     pos += 2; // Advance past the length bytes
 
     // Check for Start Of Frame (SOF) markers [0xC0..0xCF]
-
-    // 0xC0: Baseline DCT (Standard JPEG) - Supported
     if (marker == 0xC0)
       return JpegKind::BASELINE;
-
-    // 0xC2: Progressive DCT - Supported (via conversion)
     if (marker == 0xC2)
       return JpegKind::PROGRESSIVE;
 
-    // Check for unsupported SOF markers (e.g., Arithmetic, Lossless)
-    // NOTE: The range 0xC0-0xCF contains some non-SOF markers:
-    // 0xC4 = DHT (Define Huffman Table)
-    // 0xC8 = JPG (Reserved extension)
-    // 0xCC = DAC (Define Arithmetic Coding)
-    //
-    // Explicitly ignore DHT/JPG/DAC so they don't trigger JpegKind::OTHER
+    // Explicitly ignore DHT/JPG/DAC
     if (marker == 0xC4 || marker == 0xC8 || marker == 0xCC) {
-      // Just a table definition; skip payload via logic at bottom of loop
+      // Just a table definition; skip payload
     } else if (marker >= 0xC1 && marker <= 0xCF) {
-      // It is a Start of Frame marker, but not C0 or C2 (e.g. C3 Lossless)
+      // It is a Start of Frame marker, but not C0 or C2
       return JpegKind::OTHER;
     }
 
     // Skip the segment payload to reach the next marker
-    // (segLen includes the 2 length bytes we already advanced, so subtract 2)
     pos += segLen - 2;
   }
 
-  // Hit end of buffer without finding a SOF marker
   return JpegKind::INVALID;
 }
-
 // Callback for stbi_write_jpg_to_func
 void stbiWriteFunc(void *context, void *data, int size) {
   std::vector<uint8_t> *vec = static_cast<std::vector<uint8_t> *>(context);
@@ -107,9 +104,9 @@ void stbiWriteFunc(void *context, void *data, int size) {
 PsramVector convertToBaseline(PsramVector source) {
   int w, h, c;
 
-// Determine required channels based on hardware.
-// Inkplate 6COLOR needs 3 (RGB), standard Inkplate needs only 1 (Grayscale).
-// Using 1 channel saves ~2MB of PSRAM for a 1200x825 image.
+// Determine required channels based on hardware
+// Inkplate 6COLOR needs 3 (RGB), standard Inkplate needs only 1 (Grayscale)
+// Using 1 channel saves ~2MB of PSRAM for a 1200x825 image
 #if defined(ARDUINO_INKPLATECOLOR)
   const int req_channels = 3;
   Logger::log(Logger::LOG_DEBUG, "STB: Mode RGB (Color)");
@@ -160,10 +157,11 @@ PsramVector convertToBaseline(PsramVector source) {
 
   // Free excess capacity in the output vector before returning
   // This ensures the vector only takes up exactly what it needs, preventing
-  // wasted heap/PSRAM when the vector is passed back to the caller.
+  // wasted heap/PSRAM when the vector is passed back to the caller
   output.shrink_to_fit();
 
-  Logger::logf(Logger::LOG_DEBUG, "STB: Complete. Size: %d (PSRAM Free: %d)", output.size(), ESP.getFreePsram());
+  Logger::logf(Logger::LOG_DEBUG, "STB: Complete. Size: %d (PSRAM Free: %d)",
+               output.size(), ESP.getFreePsram());
   return output;
 }
 

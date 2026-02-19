@@ -22,14 +22,14 @@
     "license": "MIT",
     "dependencies": {
         "cbor2": "^2.2.1",
-        "hono": "^4.11.9",
+        "hono": "^4.11.10",
         "html-minifier-terser": "^7.2.0",
         "qrcode-svg": "^1.1.0",
         "sharp": "^0.34.5"
     },
     "devDependencies": {
         "@cloudflare/puppeteer": "^1.0.6",
-        "@cloudflare/workers-types": "^4.20260218.0",
+        "@cloudflare/workers-types": "^4.20260219.0",
         "wrangler": "^4.66.0"
     }
 }

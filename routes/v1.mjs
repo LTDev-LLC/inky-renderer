@@ -43,6 +43,31 @@ v1.use("/*", async (c, next) => {
     return basicAuth(...users.map(([username, password]) => ({ username, password })))(c, next)
 });
 
+// Create an AI slop endpoint
+v1.get('/_internal/ai-slop/:token?', async (c) => {
+    if (c.env.SLOP_ACCESS_TOKEN !== c.req.param('token')) {
+        console.error("Missing SLOP_ACCESS_TOKEN");
+        return getFallbackResponse({ w: 1200, h: 825 }, "ai-slop");
+    }
+
+    if (!c?.env?.AI || !c?.env?.SLOP_IMAGE_MODEL || !c?.env?.SLOP_PROMPT_MODEL) {
+        console.error("Missing AI, SLOP_IMAGE_MODEL or SLOP_PROMPT_MODEL");
+        return getFallbackResponse({ w: 1200, h: 825 }, "ai-slop");
+    }
+
+    return b64png((await c.env.AI.run(c.env.SLOP_IMAGE_MODEL, {
+        prompt: (await c.env.AI.run(c.env.SLOP_PROMPT_MODEL, {
+            max_tokens: 256,
+            messages: [
+                { role: "system", content: _systemPrompt },
+                { role: "user", content: _prompt },
+            ],
+            seed: ~~(Math.random() * 100000000),
+            temperature: 1,
+        })).response
+    })).image);
+});
+
 // Content rendering endpoint
 v1.get('/render/:providers?/:raw?', async (c) => {
     let _providers = c.req.param('providers'),
@@ -64,56 +89,33 @@ v1.get('/render/:providers?/:raw?', async (c) => {
                 : Object.keys(allProviders) // Otherwise, use all providers available
         );
 
-    // If the provider is "ai-slop", generate an AI image
+    // If the provider is "ai-slop", return the AI slop endpoint
     if (_provider == "ai-slop") {
-        if (!c?.env?.AI || !c?.env?.IMAGES || !c?.env?.SLOP_IMAGE_MODEL || !c?.env?.SLOP_PROMPT_MODEL)
+        if (!c?.env?.AI || !c?.env?.SLOP_IMAGE_MODEL || !c?.env?.SLOP_PROMPT_MODEL)
             return getFallbackResponse(_mode, "ai-slop");
 
-        // Generate an AI image, convert from base64 to a Response object
-        let image = b64png((await c.env.AI.run(c.env.SLOP_IMAGE_MODEL, {
-            prompt: (await c.env.AI.run(c.env.SLOP_PROMPT_MODEL, {
-                max_tokens: 256,
-                messages: [
-                    { role: "system", content: _systemPrompt },
-                    { role: "user", content: _prompt },
-                ],
-                seed: ~~(Math.random() * 100000000),
-                temperature: 1,
-            })).response
-        })).image);
+        // Build the endpoint
+        let _host = new URL(c.req.raw.url),
+            cacheEverything = c.req.query('cache') == "false" ? false : true,
+            endpoint = [
+                _host.origin,
+                "/api/v1/_internal/ai-slop/",
+                c.env.SLOP_ACCESS_TOKEN,
+                `?${new URLSearchParams(_mode).toString()}`
+            ].join("");
 
-        // If transform is disabled, return the image
-        if (!_mode.transform)
-            return new Response(image.body ?? await image.arrayBuffer(), {
-                headers: new Headers([
-                    ["Content-Type", "image/jpeg"],
-                    ["X-Image-Source", "AI Slop"],
-                    ['X-Inky-Message-2', "AI Generated Image"],
-                ])
-            });
-
-        // Use the IMAGES binding to transform AI output into the requested render size
-        const transformed = await (
-            await c.env.IMAGES
-                .input(image.body ?? await image.arrayBuffer())
-                .transform({
-                    width: _mode.w,
-                    height: _mode.h,
-                    fit: 'cover',
-                    saturation: 0 // Grayscale
-                })
-                .output({
-                    format: "image/jpeg",
-                    quality: 75
-                })
-        ).response();
-
-        // Return transformed response body with app-specific headers
-        return new Response(transformed.body, {
-            status: transformed.status,
-            statusText: transformed.statusText,
+        // To property transform we must make an API call to the internal AI slop endpoint
+        return new Response((
+            (await fetch(endpoint, {
+                cf: {
+                    cacheTtlByStatus: { "200-299": 1800, 404: 30, "500-599": 30 },
+                    cacheEverything,
+                    ...(transform(_mode, ["X-Inky-Message-2"], 'cover')?.cf || {}),
+                }
+            })).body
+        ), {
             headers: new Headers([
-                ...transformed.headers,
+                ["Content-Type", "image/jpeg"],
                 ["X-Image-Size", `${_mode.w}x${_mode.h}`],
                 ["X-Image-Source", "AI Slop"],
                 ['X-Inky-Message-2', "AI Generated Image"],
@@ -244,7 +246,7 @@ v1.get('/render/:providers?/:raw?', async (c) => {
                 // Take a screenshot
                 let screenshot = (await $target.screenshot(Object.assign({
                     type: "jpeg", // Always use jpeg
-                    quality: 100,
+                    quality: _mode.q ?? 50,
                     omitBackground: true,
                     optimizeForSpeed: true,
                 }, (await provider?.options?.(_mode, c) ?? {}))));
