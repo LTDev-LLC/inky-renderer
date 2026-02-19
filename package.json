@@ -1,0 +1,35 @@
+{
+    "name": "inky-renderer",
+    "version": "0.0.1-beta.3",
+    "description": "A remote render service for Inkplate devices via Cloudflare Workers.",
+    "main": "index.mjs",
+    "repository": "https://github.com/LouisT/inky-renderer",
+    "scripts": {
+        "deploy": "npx wrangler deploy --minify index.mjs",
+        "secrets": "npx wrangler secret bulk .secrets.json",
+        "certs:update": "node tools/update_root_cas.mjs --profile cloudflare",
+        "certs:cloudflare": "node tools/update_root_cas.mjs --profile cloudflare",
+        "certs:webpki": "node tools/update_root_cas.mjs --profile webpki",
+        "certs:help": "node tools/update_root_cas.mjs --help",
+        "deps": "npx npm-check-updates -u && npm install && npx depcheck",
+        "deps:force": "npx npm-check-updates -u && rm -rf node_modules package-lock.json && npm install --force && npx depcheck",
+        "dev": "npx wrangler dev index.mjs",
+        "img2logo": "node tools/img2logo.mjs",
+        "html2h": "node tools/html2h.mjs",
+        "json2env": "node tools/json2env.mjs"
+    },
+    "author": "LTDev LLC",
+    "license": "MIT",
+    "dependencies": {
+        "cbor2": "^2.2.1",
+        "hono": "^4.11.9",
+        "html-minifier-terser": "^7.2.0",
+        "qrcode-svg": "^1.1.0",
+        "sharp": "^0.34.5"
+    },
+    "devDependencies": {
+        "@cloudflare/puppeteer": "^1.0.6",
+        "@cloudflare/workers-types": "^4.20260218.0",
+        "wrangler": "^4.66.0"
+    }
+}

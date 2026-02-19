@@ -1,0 +1,429 @@
+#define FS_NO_GLOBALS
+#include <FS.h>
+#ifdef FILE_READ
+#undef FILE_READ
+#endif
+#ifdef FILE_WRITE
+#undef FILE_WRITE
+#endif
+
+#include <ArduinoJson.h>
+#include <ArduinoOTA.h>
+#include <ESPmDNS.h>
+#include <Inkplate.h>
+#include <LittleFS.h>
+#include <esp_sleep.h>
+#include <map>
+
+#include "battery.h"
+#include "definitions.h"
+#include "logger.h"
+#include "networking.h"
+#include "time_utils.h"
+#include "tls_utils.h"
+
+#ifdef ARDUINO_INKPLATE10V2
+Inkplate display(INKPLATE_3BIT);
+#endif
+#ifdef ARDUINO_INKPLATECOLOR
+Inkplate display;
+#endif
+
+// Define modes for clarity
+enum BootMode { MODE_NORMAL, MODE_WIFI_SETUP, MODE_MAINTENANCE };
+
+// Allocate the JSON document
+JsonDocument config;
+
+// Misc settings and flags.
+int deepSleepTime = 3600; // (in seconds)
+int batteryPercent = 0;
+double batteryVoltage = 0.0;
+bool showBattery = false;
+const char *deepSleepStopTime = "10:30pm";
+const char *deepSleepStartTime = "7:30am";
+
+// Use an RTC variable to see if initial boot has been done
+RTC_DATA_ATTR bool hideSplashScreen = false;
+RTC_DATA_ATTR char nextWakeTime[10] = {0};
+
+// Draw battery percentage + render screen
+void draw(const bool render = true,
+          int rotation = display.Adafruit_GFX::getRotation()) {
+  if (batteryPercent <= 10 || !hideSplashScreen || showBattery)
+    Logger::onScreen(Logger::LOG_INFO, false, 0, rotation,
+                     "Battery: %.2fv (%d%%)", batteryVoltage, batteryPercent);
+
+  if (render)
+    display.display();
+}
+
+// Enter deep sleep mode
+void deepSleep(const bool render = true,
+               const JsonVariant &jsonRenderer = config["renderer"]) {
+  if (render)
+    draw(true);
+
+  // Turn off display, not supported on Inkplate 6COLOR
+#ifdef ARDUINO_INKPLATE10V2
+  display.einkOff();
+#endif
+
+  Logger::log(Logger::LOG_DEBUG, "Preparing to deep sleep...");
+  delay(1000);
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, LOW);
+
+  if (display.rtcIsSet() && jsonRenderer.is<JsonObject>()) {
+    JsonObject wakesObj = jsonRenderer["wakes"];
+
+    String sleepStart = jsonRenderer["sleepwindow"]["start"] | "";
+    String sleepStop = jsonRenderer["sleepwindow"]["stop"] | "";
+    String defaultEndpoint =
+        jsonRenderer["default"] | "/render/unsplash,wallhaven";
+    String intervalStr = jsonRenderer["wake-interval"] | "";
+
+    WakeEntry wake =
+        calculateNextWake(display.rtcGetEpoch(), sleepStart, sleepStop,
+                          wakesObj, defaultEndpoint, intervalStr);
+    strncpy(nextWakeTime, wake.time.c_str(), sizeof(nextWakeTime) - 1);
+    nextWakeTime[sizeof(nextWakeTime) - 1] = '\0';
+
+    Logger::logf(Logger::LOG_DEBUG, "RTC Time before sched: %s",
+                 fmtEpoch(display.rtcGetEpoch()).c_str());
+
+    // Ensure RTC time is set
+    if (display.rtcGetEpoch() < 1700000000)
+      Logger::log(Logger::LOG_ERROR, "RTC lost time! Re-syncing recommended.");
+
+    display.rtcSetAlarmEpoch(wake.epoch, RTC_ALARM_MATCH_DHHMMSS);
+
+    Logger::logf(Logger::LOG_INFO, "Next RTC Wake: %s, Endpoint: %s",
+                 fmtEpoch(wake.epoch).c_str(), wake.endpoint.c_str());
+    esp_sleep_enable_ext1_wakeup(GPIO_SEL_39, ESP_EXT1_WAKEUP_ALL_LOW);
+  } else {
+    Logger::logf(Logger::LOG_INFO, "RTC unset, sleeping %d seconds.",
+                 deepSleepTime);
+    esp_sleep_enable_timer_wakeup(deepSleepTime * uS_TO_S_FACTOR);
+  }
+
+  delay(1000);
+  Logger::cleanup(5000);
+  WiFi.disconnect();
+  WiFi.mode(WIFI_OFF);
+
+  delay(500);
+  esp_deep_sleep_start();
+}
+
+void setup() {
+  // Initialize
+  pinMode(39, INPUT_PULLUP);
+  Serial.begin(115200);
+  display.begin();
+
+  // Read battery voltage at startup, store for more accurate logging
+  batteryVoltage = display.readBattery();
+  batteryPercent = getBatteryPercentage(batteryVoltage);
+
+#if defined(RTC_OFFSET_MODE) && defined(RTC_OFFSET_VALUE)
+  display.rtcSetClockOffset(RTC_OFFSET_MODE, RTC_OFFSET_VALUE);
+#endif
+
+  display.rtcGetRtcData();
+  display.rtcClearAlarmFlag();
+  display.setRotation(ROTATION);
+  display.setFont(); // Reset font
+
+  // Delay for startup
+  delay(100);
+
+  // Initialize logger
+  Logger::init(Serial, display);
+
+  // Get rotation from display instead of build flag0
+  int rotation = display.Adafruit_GFX::getRotation();
+
+  // Use for button logic; WiFi setup or maintenance mode
+  BootMode bootMode = MODE_NORMAL;
+
+  // Check if we woke up from the button (EXT0 / GPIO 36)
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+    // Check if button is effectively held down
+    if (digitalRead(36) == LOW) {
+
+      // Initial Feedback
+      Logger::onScreen(Logger::LOG_INFO, true, 2, rotation,
+                       "Button Detected... Keep holding to select mode.");
+      delay(500); // Small debounce/read delay
+
+      unsigned long startHold = millis();
+
+      // Loop while button is held
+      while (digitalRead(36) == LOW) {
+        unsigned long duration = millis() - startHold;
+
+        // WiFi Manager (2 - 5 seconds)
+        if (duration > 2000 && duration < 5000 && bootMode != MODE_WIFI_SETUP) {
+          display.clearDisplay();
+          display.setTextSize(3);
+          display.setCursor(20, 50);
+          display.println("Release For:");
+          display.setTextSize(4);
+          display.setCursor(20, 90);
+          display.println(">> WIFI Setup <<");
+          display.display();
+
+          bootMode = MODE_WIFI_SETUP;
+        }
+        //  Maintenance Mode (> 5 seconds)
+        else if (duration > 5000 && bootMode != MODE_MAINTENANCE) {
+          display.clearDisplay();
+          display.setTextSize(3);
+          display.setCursor(20, 50);
+          display.println("Release For:");
+          display.setTextSize(4);
+          display.setCursor(20, 90);
+          display.println(">> Maintenance Mode <<");
+          display.setCursor(20, 130);
+          display.setTextSize(2);
+          display.println("(OTA Updater)");
+          display.display();
+
+          bootMode = MODE_MAINTENANCE;
+        }
+
+        delay(100); // Check every 100ms
+      }
+
+      // Button Released - Confirm Selection
+      if (bootMode != MODE_NORMAL) {
+        Logger::logf(Logger::LOG_INFO, "Button released. Selection: %s",
+                     bootMode == MODE_WIFI_SETUP ? "WiFi Setup"
+                                                 : "Maintenance Mode");
+        delay(1000);
+      }
+    }
+  }
+
+  // We do this BEFORE LittleFS.begin() to allow recovering from a corrupt
+  // filesystem.
+  if (bootMode == MODE_MAINTENANCE) {
+    // Try to connect to WiFi
+    if (WifiConnect(display, 15, false) != ESP_OK) {
+      Logger::onScreen(Logger::LOG_CRITICAL, true, 2, rotation,
+                       "WiFi Failed. Cannot enter Maintenance Mode.");
+      deepSleep();
+      return;
+    }
+
+    // This function blocks forever and handles the web server
+    StartOTAServer(display, rotation);
+  } else if (bootMode == MODE_WIFI_SETUP) {
+    // Force the Captive Portal
+    WifiConnect(display, 180, true);
+
+    // After setup, we restart to apply settings and load config cleanly
+    ESP.restart();
+  }
+
+  // Mount LittleFS
+  if (!LittleFS.begin(true)) {
+    Logger::onScreen(Logger::LOG_CRITICAL, true, 2, rotation,
+                     "Failed to mount LittleFS!");
+    deepSleep();
+    return;
+  }
+
+  // Load config.json
+  fs::File file = LittleFS.open(CONFIG_FILE_PATH, "r");
+  if (!file || file.size() == 0) {
+    Logger::onScreen(Logger::LOG_CRITICAL, true, 2, rotation,
+                     "Config file missing or empty!");
+    deepSleep();
+    return;
+  }
+
+  // Get file size for logging
+  size_t fileSize = file.size();
+
+  // Deserialize directly from the file stream.
+  // This avoids allocating a temporary std::string buffer for the raw file.
+  DeserializationError error = deserializeJson(config, file);
+  file.close(); // Close immediately after parsing
+
+  // Go to sleep if we failed to parse the config
+  if (error) {
+    Logger::onScreen(Logger::LOG_CRITICAL, true, 2, rotation,
+                     "Failed to parse config.json!");
+    deepSleep();
+    return;
+  }
+
+  // Load TLS CA bundle for HTTPS/MQTT verification.
+  TLSLoadCACert(config.as<JsonVariant>());
+
+  // Enable MQTT logging queue if MQTT is enabled
+  if (config["mqtt"]["enabled"] == true)
+    Logger::setMQTTClient(mqttClient,
+                          config["mqtt"]["topic"] | "inky-renderer");
+
+#if defined(RTC_OFFSET_MODE) && defined(RTC_OFFSET_VALUE)
+  Logger::logf(Logger::LOG_INFO, "RTC offset mode: %d, value: %d",
+               RTC_OFFSET_MODE, RTC_OFFSET_VALUE);
+#endif
+
+  // Print wakeup reason
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  switch (wakeup_reason) {
+  case ESP_SLEEP_WAKEUP_EXT0:
+    showBattery = true;
+    Logger::log(Logger::LOG_NOTICE,
+                "wakeup caused by external signal using RTC_IO.");
+    break;
+  case ESP_SLEEP_WAKEUP_EXT1:
+    Logger::log(Logger::LOG_NOTICE,
+                "wakeup caused by external signal using RTC_CNTL.");
+    break;
+  case ESP_SLEEP_WAKEUP_TIMER:
+    Logger::log(Logger::LOG_NOTICE, "wakeup caused by timer.");
+    break;
+  case ESP_SLEEP_WAKEUP_ULP:
+    Logger::log(Logger::LOG_NOTICE, "wakeup caused by ULP program.");
+    break;
+  default:
+    hideSplashScreen = false;
+    Logger::log(Logger::LOG_NOTICE, "wakeup caused by RST pin or power button");
+    break;
+  }
+
+  // Log some basic information
+  Logger::logf(Logger::LOG_DEBUG, "Config file: %s (bytes=%d, version=%s)",
+               CONFIG_FILE_PATH, fileSize,
+               config["version"].as<String>().c_str());
+  if (!hideSplashScreen) {
+    Logger::onScreen(Logger::LOG_INFO, true, 2, rotation,
+                     "--- Inky Renderer (%s, v%s) ---", BUILD_TYPE,
+                     INKY_RENDERER_VERSION);
+    draw();
+    hideSplashScreen = true;
+  } else {
+    // Get battery voltage and percentage
+    double bvolt = display.readBattery();
+    int battRemaining = getBatteryPercentage(bvolt);
+
+    // Log battery voltage and percentage
+    Logger::logf(Logger::LOG_INFO, "--- Inky Renderer (%s, v%s) - Rotation: %d",
+                 BUILD_TYPE, INKY_RENDERER_VERSION, rotation);
+    Logger::logf(Logger::LOG_INFO, "Battery: %sv (est: %d%%)", String(bvolt, 2),
+                 battRemaining);
+  }
+
+  // Verify API URL
+  const char *api = config["api"].as<const char *>();
+  if (!api || strlen(api) == 0) {
+    Logger::onScreen(Logger::LOG_CRITICAL, true, 2, rotation,
+                     "API URL not specified!");
+    deepSleep();
+    return;
+  }
+
+  // Connect to WiFi
+  if (WifiConnect(display, 30, false) != ESP_OK) {
+    Logger::onScreen(Logger::LOG_CRITICAL, true, 2, rotation,
+                     "WiFi connection failed / timed out!");
+    deepSleep();
+    return;
+  }
+
+  // Connect MQTT
+  if (config["mqtt"]["enabled"] && MqttConnect(config["mqtt"]) != ESP_OK) {
+    Logger::log(Logger::LOG_ERROR, "MQTT connection failed.");
+  } else {
+    Logger::log(Logger::LOG_INFO, "MQTT connected.");
+  }
+
+  // NTP synchronization
+  if (config["ntp"]["enabled"]) {
+    if (NTPSync(display, api, config["ntp"]) != ESP_OK)
+      Logger::log(Logger::LOG_ERROR, "NTP sync failed; using fallback timing.");
+  } else {
+    display.rtcReset();
+    Logger::log(Logger::LOG_INFO, "NTP disabled; using hourly fallback.");
+  }
+
+  // If rendere.standby is set to true, display the loading image before pulling
+  // the image from the renderer.
+  if (config["renderer"]["cleardisplay"]) {
+    const char *psb = "Please Stand By";
+    display.clearDisplay();
+#ifdef ARDUINO_INKPLATE10V2
+    // Only show on Inkplate 10; far too slow with 6COLOR!
+    display.setTextWrap(false);
+    if (rotation == 0 || rotation == 2) {
+
+      display.fillRect(0, 0, 1200, 825, 5);
+      display.fillRect(20, 303, 1160, 219, 2);
+      display.setTextColor(0);
+      display.setTextSize(12);
+      display.setCursor(85, 390);
+      display.print(psb);
+      display.setTextColor(5);
+      display.setCursor(67, 378);
+      display.print(psb);
+      display.setTextColor(7);
+      display.setCursor(66, 371);
+      display.print(psb);
+    } else {
+      display.fillRect(0, 0, 825, 1200, 5);
+      display.fillRect(0, 491, 825, 219, 2);
+      display.setTextColor(0);
+      display.setTextSize(9);
+      display.setTextWrap(false);
+      display.setCursor(19, 576);
+      display.print(psb);
+      display.setTextColor(5);
+      display.setCursor(12, 569);
+      display.print(psb);
+      display.setTextColor(7);
+      display.setCursor(12, 565);
+      display.print(psb);
+    }
+#endif
+    draw();
+  }
+
+  // Disable showBattery, it should only display on "stand by" screen
+  // we don't want to block the displayed content unless the battery is low.
+  showBattery = false;
+
+  // Determine endpoint
+  const char *endpoint =
+      (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 &&
+       config["renderer"]["button"].as<const char *>())
+          ? config["renderer"]["button"]
+                .as<const char *>() // Render wake buton endpoint
+          : (strlen(nextWakeTime) > 0
+                 ? config["renderer"]["wakes"][nextWakeTime]
+                       .as<const char *>() // Render last wake endpoint
+                 : config["renderer"]["default"]
+                       .as<const char *>()); // Render default endpoint
+  if (endpoint == nullptr) {
+    delay(5000); // WARN: Don't burn out the screen!
+    Logger::onScreen(Logger::LOG_CRITICAL, true, 2, rotation,
+                     "No renderer endpoint specified!");
+    deepSleep();
+    return;
+  }
+
+  // Fetch and render image
+  if (DisplayImage(display, rotation, api, config["renderer"].as<JsonVariant>(),
+                   endpoint) != ESP_OK)
+    Logger::onScreen(Logger::LOG_ERROR, true, 2, rotation,
+                     "Image fetch/render failed!");
+
+  deepSleep(true, config["renderer"]);
+}
+
+void loop() {
+  // Never here, as deepsleep restarts esp32
+}

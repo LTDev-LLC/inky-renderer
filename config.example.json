@@ -1,0 +1,40 @@
+{
+    "api": "https://inky:a-password@inky.example.com",
+    "security": {
+        "allowInsecure": false,
+        "caCertPath": "/certs/root_cas.pem"
+    },
+    "mqtt": {
+        "enabled": true,
+        "pass": "password",
+        "port": 1883,
+        "retries": 3,
+        "server": "mqtt.example.com",
+        "user": "username"
+    },
+    "ntp": {
+        "basepath": "/api/v0",
+        "enabled": true,
+        "retries": 3,
+        "server1": "time.cloudflare.com",
+        "server2": "pool.ntp.org",
+        "timezone": "America/Los_Angeles"
+    },
+    "renderer": {
+        "basepath": "/api/v1",
+        "button": "/render/weather?location=Los%20Angeles,%20CA",
+        "cleardisplay": true,
+        "default": "/render/unsplash,wallhaven,xkcd",
+        "retries": 3,
+        "sleepwindow": {
+            "start": "10:30pm",
+            "stop": "7:30am"
+        },
+        "timeout": 30,
+        "wakes": {
+            "10:30am": "/render/news?section=us",
+            "5:00pm": "/render/news?section=world",
+            "8:00am": "/render/weather?location=Los%20Angeles,%20CA"
+        }
+    }
+}

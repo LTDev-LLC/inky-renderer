@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inky Renderer OTA Update</title>
+  <style>
+    body {
+      background-color: #121212;
+      color: #e0e0e0;
+      font-family: 'Courier New', Courier, monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 50vh;
+      margin: 0;
+    }
+
+    h1 {
+      margin-bottom: 2rem;
+      text-align: center;
+    }
+
+    .card {
+      background-color: #1e1e1e;
+      padding: 2rem;
+      border-radius: 12px;
+      width: 320px;
+      text-align: center;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+
+    select,
+    input[type="file"] {
+      width: 100%;
+      margin-bottom: 15px;
+      background-color: #333;
+      color: #fff;
+      border: 1px solid #444;
+      padding: 10px;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+
+    .btn-action {
+      width: 100%;
+      padding: 12px;
+      margin-top: 10px;
+      background-color: #03dac6;
+      color: #000;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 1rem;
+      transition: background-color 0.2s;
+    }
+
+    .btn-action:hover {
+      background-color: #018786;
+    }
+
+    .progress-container {
+      width: 100%;
+      background-color: #333;
+      height: 20px;
+      margin-top: 20px;
+      display: none;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      background-color: #bb86fc;
+      transition: width 0.2s ease-in-out;
+      border-radius: 4px;
+    }
+
+    #status-message {
+      margin: 0;
+      margin-top: 1.2em;
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Inky Renderer OTA</h1>
+  <div class="card">
+    <select id="update-type">
+      <option value="fw">Firmware</option>
+      <option value="fs">LittleFS</option>
+    </select>
+    <input type="file" id="file-input" accept=".bin">
+    <button class="btn-action">Upload & Flash</button>
+    <div class="progress-container" id="progress-wrapper">
+      <div class="progress-fill" id="progress-bar"></div>
+    </div>
+    <p id="status-message"></p>
+  </div>
+  <script>
+    document.querySelector('.btn-action').addEventListener('click', () => {
+      const fileInput = document.getElementById('file-input'),
+        updateType = document.getElementById('update-type').value,
+        statusDisplay = document.getElementById('status-message'),
+        progressBar = document.getElementById('progress-bar'),
+        progressWrapper = document.getElementById('progress-wrapper'),
+        file = fileInput.files[0];
+
+      statusDisplay.style.display = 'block';
+
+      if (!file) {
+        statusDisplay.innerText = 'Please select a file first.';
+        statusDisplay.style.color = '#cf6679';
+        return;
+      }
+
+      statusDisplay.innerText = 'Uploading...';
+      statusDisplay.style.color = '#e0e0e0';
+      progressWrapper.style.display = 'block';
+      progressBar.style.width = '0%';
+      progressBar.style.backgroundColor = '#bb86fc';
+
+      const formData = new FormData();
+      formData.append('update', file);
+      const xhr = new XMLHttpRequest();
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable)
+          progressBar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+      };
+
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          statusDisplay.innerText = 'Success! Device is rebooting...';
+          statusDisplay.style.color = '#03dac6';
+          progressBar.style.backgroundColor = '#03dac6';
+        } else {
+          statusDisplay.innerText = 'Error: ' + xhr.status;
+          statusDisplay.style.color = '#cf6679';
+        }
+      };
+
+      xhr.onerror = () => {
+        statusDisplay.innerText = 'Upload Failed';
+        statusDisplay.style.color = '#cf6679';
+      };
+
+      xhr.open('POST', '/update?type=' + updateType);
+      xhr.send(formData);
+    });
+  </script>
+</body>
+
+</html>

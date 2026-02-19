@@ -1,0 +1,44 @@
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "compatibility_date": "2025-04-05",
+    "compatibility_flags": [
+        "nodejs_compat"
+    ],
+    "minify": true,
+    "name": "inky-renderer",
+    "workers_dev": false,
+    "ai": {
+        "binding": "AI"
+    },
+    "images": {
+        "binding": "IMAGES"
+    },
+    "d1_databases": [
+        {
+            "remote": true,
+            "binding": "IMAGE_GALLERY",
+            "database_name": "inky-images",
+            "database_id": "a1026a39-56b1-4578-877c-e206fbe22945"
+        }
+    ],
+    "kv_namespaces": [
+        {
+            "binding": "INKY_BROWSER_RENDERING",
+            "id": "d5c6c98d26824dd1966453a1b04ef7cf",
+            "preview_id": "45f7b4dd887c4146be8c96c6fa6e30ae"
+        }
+    ],
+    "browser": {
+        "binding": "BROWSER"
+    },
+    "assets": {
+        "binding": "ASSETS",
+        "directory": "./assets"
+    },
+    "observability": {
+        "enabled": true
+    },
+    "placement": {
+        "mode": "smart"
+    }
+}
